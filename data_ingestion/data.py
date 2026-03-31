@@ -4,6 +4,7 @@ import time
 
 def grab_data():
     """
+    Matt
     Grabs all trades made today using kalshi API. 
     Future implementation: args to the function to request specific markets, times, and how many trades in total
 
