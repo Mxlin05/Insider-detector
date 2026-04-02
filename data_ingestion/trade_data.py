@@ -2,83 +2,101 @@ import requests
 import mysql.connector
 from mysql.connector import Error
 import getpass
+import time
 
-def grab_data():
+def grab_data(connection):
     """
     Grabs trades using Polymarket API. 
     Possible future implementation: args to the function to request specific markets, times, and how many trades in total
     
     Polymarket Trade Data Dictionary Breakdown:
-    
-    --- CORE TRADER IDENTIFIERS (Who is trading?) ---
-    proxyWallet:     Their crypto wallet address. Used to track a single user across the whole platform. 
-                     Example: '0x54a296be2fe3965b2adda449659a985b4dd25a4a'
-    pseudonym:       Their display name on Polymarket. 
-                     Example: 'Able-Windshield'
-    name:            A backend ID that combines their wallet and account creation time. 
-                     Example: '0x54a296be2FE3965b2AdDa...-1771707519343'
-    bio / profileImage: User profile text and picture. 
-                     Example: '' (Usually blank unless they manually set one up).
-    
-    --- THE TRADE MATH (What exactly did they do?) ---
-    side:            Did they buy new shares or sell old ones? 
-                     Example: 'BUY'
-    size:            Volume. How many shares they traded. 
-                     Example: 4.91177
-    price:           Cost per share (in dollars). 
-                     Example: 0.43 (Meaning they paid 43 cents per share)
-    outcome:         What they actually bet on happening. 
-                     Example: 'Up' (or 'Yes', 'Biden', etc.)
-    outcomeIndex:    The backend number for that outcome (usually 0 or 1). 
-                     Example: 0
-    
-    --- MARKET IDENTIFIERS (What market are they betting in?) ---
-    title:           The plain English name of the bet. 
-                     Example: 'Bitcoin Up or Down - March 30, 10:25PM-10:30PM ET'
-    slug:            The URL name used for the specific market. 
-                     Example: 'btc-updown-5m-1774923900'
-    eventSlug:       The URL name for the broader overarching event. 
-                     Example: 'btc-updown-5m-1774923900'
-    conditionId:     The market's unique hex ID on the blockchain. 
-                     Example: '0x687959a1a3a63bbad24d6a3221d1218cf567d22e09b83c76a9a7f9327863b89f'
-    asset:           The massive token ID number for this specific contract. 
-                     Example: '49308335820357757463163602967684805595944642481576126048...'
-    icon:            The image link for the market's logo. 
-                     Example: 'https://polymarket-upload.s3.us-east-2.amazonaws.com/BTC+fullsize.png'
-    
-    --- TIMING & BLOCKCHAIN TRACING (When did it happen?) ---
-    timestamp:       The exact Unix time the trade executed. 
-                     Example: 1774924091
-    transactionHash: The blockchain receipt ID. You can search this on PolygonScan.com to see the raw crypto transaction. 
-                     Example: '0x91dc814ea62ad0fc9feb0b5d25b81f5e1bdab153d6e340d07c2ca37605cadac6'
-
     """
+    cursor = connection.cursor()
     url = "https://data-api.polymarket.com/trades" #api url
+    
+    limit = 1000
+    offset = 0
+    max_offset = 10000
 
-    params = {
-        "limit": 100, #100 trades
-    }
+    while offset <= max_offset:
+        params = {
+            "limit": limit, 
+            "offset": offset
+        }
 
-    headers = {"accept": "application/json"} 
-    print("grabbing 100 trades on polymarket today")
+        headers = {"accept": "application/json"} 
 
-    response = requests.get(url, headers=headers, params=params) #wait for response
-    if response.status_code == 200:
-        trades = response.json()
-        print(f"Downloaded {len(trades)}")
-        if trades: 
-            print("--- Database Planning: Field Breakdown ---")
-            # Grab the first trade as a sample
-            sample = trades[0]
-            
-            # Loop through every key and value to show the type and example
-            for key, value in sample.items():
-                # The : <20 just adds spaces so the columns line up perfectly
-                print(f"Column: {key: <25} | Python Type: {type(value).__name__: <8} | Example: {value}")
-            print("------------------------------------------\n")
-    else:
-        print(f"error: {response.status_code}")
-        print(response.text)
+        response = requests.get(url, headers=headers, params=params) #wait for response
+        if response.status_code == 200:
+            trades = response.json()
+            if not trades: 
+                print("no more trades could be grabbed. Exiting")
+                break
+            else:
+                print(f"Downloaded {len(trades)} trades") 
+                
+                profile_sql = """
+                    INSERT IGNORE INTO profiles 
+                    (proxyWallet, pseudonym, name, bio, profileImage, profileImageOptimized)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                trade_sql = """
+                    INSERT IGNORE INTO trades 
+                    (proxyWallet, side, asset, conditionId, size, price, timestamp, 
+                    title, slug, eventSlug, outcome, outcomeIndex, transactionHash, icon)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+
+                profile_buffer = []
+                trade_buffer = []
+                for trade in trades: #sql calls to insert trades into table
+                    
+                    profile_values = (
+                        trade.get('proxyWallet', 'UNKNOWN'),
+                        trade.get('pseudonym', ''),
+                        trade.get('name', ''),
+                        trade.get('bio', ''),
+                        trade.get('profileImage', ''),
+                        trade.get('profileImageOptimized', '')
+                    )
+                    profile_buffer.append(profile_values)
+
+                    trade_values = (
+                        trade.get('proxyWallet', 'UNKNOWN'),
+                        trade.get('side', ''),
+                        trade.get('asset', ''),
+                        trade.get('conditionId', ''),
+                        trade.get('size', 0.0),
+                        trade.get('price', 0.0),
+                        trade.get('timestamp', 0),
+                        trade.get('title', ''),
+                        trade.get('slug', ''),
+                        trade.get('eventSlug', ''),
+                        trade.get('outcome', ''),
+                        trade.get('outcomeIndex', 0),
+                        trade.get('transactionHash', ''),
+                        trade.get('icon', '')
+                    )
+                    trade_buffer.append(trade_values)
+
+                cursor.executemany(profile_sql, profile_buffer)
+                cursor.executemany(trade_sql, trade_buffer)
+                connection.commit()
+                offset += limit
+                time.sleep(0.5)
+                # print("--- Database Planning: Field Breakdown ---")
+                # # Grab the first trade as a sample
+                # sample = trades[0]
+                
+                # # Loop through every key and value to show the type and example
+                # for key, value in sample.items():
+                #     # The : <20 just adds spaces so the columns line up perfectly
+                #     print(f"Column: {key: <25} | Python Type: {type(value).__name__: <8} | Example: {value}")
+                # print("------------------------------------------\n")
+        else:
+            print(f"error: {response.status_code}")
+            print(response.text)
+            break
 
 def create_db():
     """
@@ -86,6 +104,8 @@ def create_db():
     """
 
     db_passwd = getpass.getpass("Enter MySQL root password: ") #db password
+    cursor = None
+    connection = None
 
     try: 
         connection = mysql.connector.connect( #connect to db
@@ -105,11 +125,10 @@ def create_db():
             create_tables(cursor)
     except Error as e:
         print(f"mysql error: {e}")
-    finally:
-        if "connection" in locals() and connection.is_connected():
+    finally: 
+        if cursor:
             cursor.close()
-            connection.close()
-            print("MySQL connection closed.")
+        return connection
 
 
 def create_tables(cursor):
@@ -127,8 +146,38 @@ def create_tables(cursor):
         );
     """
 
-    
+    trades = """
+        create table if not exists trades (
+            id int auto_increment primary key,
+            proxyWallet VARCHAR(100),
+            side VARCHAR(20),
+            asset VARCHAR(100),
+            conditionId VARCHAR(100),
+            size DECIMAL(18,5),
+            price DECIMAL(10,4),
+            timestamp BIGINT,
+            title text,
+            slug VARCHAR(255),
+            eventSlug VARCHAR(255),
+            outcome VARCHAR(100),
+            outcomeIndex INT,
+            transactionHash VARCHAR(200),
+            icon text,
+
+            foreign key (proxyWallet) references profiles(proxyWallet),
+            unique key unique_trade (transactionHash, conditionId, side)
+        );
+    """ #unique key ensures that there cannot be duplicates of a trade where all 3 hash, market ID, and side is the same
+
+    print("Building and Filling tables with data")
+    cursor.execute(profiles)
+    cursor.execute(trades)
+    print("profile and trades tables have been setup")
+
 
 if __name__ == "__main__":
-    create_db()
-    grab_data()
+    db_conn = create_db()
+    if db_conn and db_conn.is_connected(): 
+        grab_data(db_conn)
+        db_conn.close()
+        print("Tables filled and sql connection terminated")
